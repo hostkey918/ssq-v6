@@ -54,6 +54,21 @@ def consecutive_summary(reds: Iterable[int]) -> dict[str, object]:
     }
 
 
+def max_consecutive_run(reds: tuple[int, ...]) -> int:
+    max_run = 1
+    current = 1
+    previous = reds[0]
+    for number in reds[1:]:
+        if number == previous + 1:
+            current += 1
+            if current > max_run:
+                max_run = current
+        else:
+            current = 1
+        previous = number
+    return max_run
+
+
 def same_tail_text(reds: Iterable[int]) -> str:
     tails = Counter(number % 10 for number in reds)
     repeated = [f"{tail}尾x{count}" for tail, count in sorted(tails.items()) if count >= 2]
@@ -89,6 +104,7 @@ def build_history(draws: list[Draw]) -> dict[str, object]:
     all_red_masks = {red_mask(draw.reds) for draw in draws}
     all_ticket_keys = {draw_key(draw.reds, draw.blue) for draw in draws}
     latest = draws[0] if draws else None
+    latest_red_mask = red_mask(latest.reds) if latest else 0
 
     return {
         "recent30": recent30,
@@ -101,6 +117,7 @@ def build_history(draws: list[Draw]) -> dict[str, object]:
         "all_red_masks": all_red_masks,
         "all_ticket_keys": all_ticket_keys,
         "latest_reds": set(latest.reds) if latest else set(),
+        "latest_red_mask": latest_red_mask,
         "latest_blue": latest.blue if latest else None,
     }
 
@@ -134,18 +151,22 @@ def generate_candidates(
     heap_size = max(top_n * 8, min(candidate_pool, 2000), 200)
     red_heap: list[tuple[float, tuple[int, ...]]] = []
 
-    optional = [number for number in allowed_reds if number not in required]
     need = 6 - len(required)
-    for rest in combinations(optional, need):
-        reds = tuple(sorted(required + list(rest)))
-        if not _passes_filters(reds, filters, history, forbidden_masks):
-            continue
-        score = _score_red_only(reds, history)
-        entry = (score, reds)
-        if len(red_heap) < heap_size:
-            heapq.heappush(red_heap, entry)
-        elif entry > red_heap[0]:
-            heapq.heapreplace(red_heap, entry)
+    for search_reds in _red_search_sets(allowed_reds, required, history, top_n, candidate_pool):
+        red_heap.clear()
+        optional = [number for number in search_reds if number not in required]
+        for rest in combinations(optional, need):
+            reds = tuple(sorted(required + list(rest)))
+            if not _passes_filters(reds, filters, history, forbidden_masks):
+                continue
+            score = _score_red_only(reds, history)
+            entry = (score, reds)
+            if len(red_heap) < heap_size:
+                heapq.heappush(red_heap, entry)
+            elif entry > red_heap[0]:
+                heapq.heapreplace(red_heap, entry)
+        if len(red_heap) >= min(heap_size, max(top_n * 3, 80)):
+            break
 
     blue_numbers = [
         number for number in BLUE_RANGE if number not in set(filters.exclude_blues or [])
@@ -176,14 +197,10 @@ def _passes_filters(
     span = reds[-1] - reds[0]
     odd_count = sum(1 for number in reds if number % 2)
     even_count = 6 - odd_count
-    run = int(consecutive_summary(reds)["max_run"])
-    latest_reds = history["latest_reds"]
 
     if not filters.sum_min <= red_sum <= filters.sum_max:
         return False
     if not filters.span_min <= span <= filters.span_max:
-        return False
-    if not filters.ac_min <= ac_value(reds) <= filters.ac_max:
         return False
     if filters.odd_even != "any":
         try:
@@ -192,17 +209,69 @@ def _passes_filters(
             return False
         if (odd_count, even_count) != (odd, even):
             return False
-    if len(set(reds) & latest_reds) > filters.max_red_repeat:
+
+    mask = red_mask(reds)
+    if (mask & int(history["latest_red_mask"])).bit_count() > filters.max_red_repeat:
         return False
+
+    run = max_consecutive_run(reds)
     if filters.reject_four_consecutive and run >= 4:
         return False
     if filters.reject_three_consecutive and run >= 3:
         return False
     if not filters.allow_two_consecutive and run >= 2:
         return False
-    if forbidden_masks and red_mask(reds) in forbidden_masks:
+    if forbidden_masks and mask in forbidden_masks:
+        return False
+    if not filters.ac_min <= ac_value(reds) <= filters.ac_max:
         return False
     return True
+
+
+def _red_search_sets(
+    allowed_reds: list[int],
+    required: list[int],
+    history: dict[str, object],
+    top_n: int,
+    candidate_pool: int,
+) -> list[list[int]]:
+    required_set = set(required)
+    allowed_set = set(allowed_reds)
+    if len(allowed_reds) <= 24:
+        return [allowed_reds]
+
+    width = 24
+    if top_n >= 50 or candidate_pool >= 5000:
+        width = 27
+    if top_n >= 100 or candidate_pool >= 50000:
+        width = 29
+    width = min(len(allowed_reds), max(width, len(required_set) + 16))
+
+    prioritized = sorted(
+        allowed_reds,
+        key=lambda number: (
+            number in required_set,
+            _single_red_priority(number, history),
+            -number,
+        ),
+        reverse=True,
+    )
+    first_pass = sorted((set(prioritized[:width]) | required_set) & allowed_set)
+    if len(first_pass) == len(allowed_reds):
+        return [first_pass]
+    return [first_pass, allowed_reds]
+
+
+def _single_red_priority(number: int, history: dict[str, object]) -> float:
+    red30: Counter[int] = history["red30"]
+    red100: Counter[int] = history["red100"]
+    max30 = max(red30.values(), default=1)
+    max100 = max(red100.values(), default=1)
+    hot30 = red30[number] / max30 if max30 else 0
+    hot100 = red100[number] / max100 if max100 else 0
+    cold = 1 - hot30
+    latest = 1 if number in history["latest_reds"] else 0
+    return hot30 * 14.0 + hot100 * 10.5 + cold * 7.0 + latest * 7.0
 
 
 def _build_history_forbidden_masks(draws: list[Draw], mode: str) -> set[int]:
