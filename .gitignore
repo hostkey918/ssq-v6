@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+frontend/node_modules/
+frontend/dist/
+backend/static/
+
+.local/
+ssq.db
+postgres_data/
+*.log

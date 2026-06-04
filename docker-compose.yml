@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ssq-v6-postgres
+    environment:
+      POSTGRES_DB: ssq
+      POSTGRES_USER: ssq
+      POSTGRES_PASSWORD: ssq
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ssq -d ssq"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ssq-v6-app
+    environment:
+      DATABASE_URL: postgresql+psycopg2://ssq:ssq@postgres:5432/ssq
+      FETCH_ISSUE_COUNT: 3000
+      SCHEDULER_ENABLED: "true"
+      SCHEDULER_CRON: "0 22 * * tue,thu,sun"
+      CORS_ORIGINS: "*"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

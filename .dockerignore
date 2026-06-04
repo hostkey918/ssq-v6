@@ -1,0 +1,8 @@
+.git
+backend/static
+frontend/node_modules
+frontend/dist
+__pycache__
+*.pyc
+.env
+README.local.md
