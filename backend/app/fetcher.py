@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
+import urllib.parse
+import urllib.request
 from datetime import date
 
 import requests
@@ -12,6 +15,16 @@ from app.models import Draw
 from app.schemas import SyncResult
 
 CWL_URL = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
+ZHCW_SSQ_URL = "https://kaijiang.zhcw.com/zhcw/inc/ssq/ssq_wqhg.jsp"
+ZHCW_ROW_RE = re.compile(
+    r"<tr>\s*"
+    r"<td[^>]*>\s*(?P<date>\d{4}-\d{2}-\d{2})\s*</td>\s*"
+    r"<td[^>]*>\s*(?P<issue>\d{7})\s*</td>\s*"
+    r"<td[^>]*style=\"padding-left:10px;\"[^>]*>(?P<numbers>.*?)</td>",
+    re.S,
+)
+ZHCW_MAX_PAGE_RE = re.compile(r"共\s*<strong>\s*(\d+)\s*</strong>\s*页")
+ZHCW_NUMBER_RE = re.compile(r"<em(?:\s+class=\"rr\")?\s*>\s*(\d{1,2})\s*</em>")
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -54,8 +67,97 @@ def fetch_cwl_draws(issue_count: int | None = None) -> list[dict[str, object]]:
     return draws
 
 
-def sync_draws(db: Session, issue_count: int | None = None) -> SyncResult:
-    rows = fetch_cwl_draws(issue_count)
+def fetch_zhcw_draws(
+    start_page: int = 1,
+    end_page: int | None = None,
+    delay_seconds: float = 0.08,
+) -> tuple[list[dict[str, object]], int, list[str]]:
+    first_html = _download_zhcw_page(start_page)
+    first_draws, max_page = parse_zhcw_page(first_html)
+    resolved_end = end_page or max_page or start_page
+    resolved_end = max(start_page, resolved_end)
+
+    rows: list[dict[str, object]] = []
+    errors: list[str] = []
+    pages_ok = 0
+    for page_num in range(start_page, resolved_end + 1):
+        try:
+            if page_num == start_page:
+                page_rows = first_draws
+            else:
+                html = _download_zhcw_page(page_num)
+                page_rows, _ = parse_zhcw_page(html)
+            if not page_rows:
+                errors.append(f"第 {page_num} 页未解析到开奖数据")
+                continue
+            pages_ok += 1
+            rows.extend(page_rows)
+        except Exception as exc:
+            errors.append(f"第 {page_num} 页抓取失败：{exc}")
+        if delay_seconds and page_num < resolved_end:
+            time.sleep(delay_seconds)
+    return rows, pages_ok, errors
+
+
+def parse_zhcw_page(html: str) -> tuple[list[dict[str, object]], int | None]:
+    rows = []
+    for match in ZHCW_ROW_RE.finditer(html):
+        numbers = [int(value) for value in ZHCW_NUMBER_RE.findall(match.group("numbers"))]
+        if len(numbers) != 7:
+            continue
+        rows.append(
+            {
+                "issue": match.group("issue"),
+                "draw_date": parse(match.group("date")).date(),
+                "reds": sorted(numbers[:6]),
+                "blue": numbers[6],
+                "source": "zhcw",
+            }
+        )
+
+    max_page_match = ZHCW_MAX_PAGE_RE.search(html)
+    max_page = int(max_page_match.group(1)) if max_page_match else None
+    return rows, max_page
+
+
+def _download_zhcw_page(page_num: int, retries: int = 3) -> str:
+    query = urllib.parse.urlencode({"pageNum": int(page_num)})
+    url = f"{ZHCW_SSQ_URL}?{query}"
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+                    )
+                },
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.read().decode("utf-8", errors="ignore")
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(0.5 * attempt)
+    raise RuntimeError(last_error)
+
+
+def sync_draws(
+    db: Session,
+    issue_count: int | None = None,
+    source: str = "zhcw",
+    start_page: int = 1,
+    end_page: int | None = None,
+) -> SyncResult:
+    pages_ok = None
+    errors: list[str] = []
+    if source == "cwl":
+        rows = fetch_cwl_draws(issue_count)
+    else:
+        rows, pages_ok, errors = fetch_zhcw_draws(start_page=start_page, end_page=end_page)
+
     inserted = 0
     updated = 0
 
@@ -82,4 +184,11 @@ def sync_draws(db: Session, issue_count: int | None = None) -> SyncResult:
             inserted += 1
 
     db.commit()
-    return SyncResult(fetched=len(rows), inserted=inserted, updated=updated)
+    return SyncResult(
+        fetched=len(rows),
+        inserted=inserted,
+        updated=updated,
+        source=source,
+        pages_ok=pages_ok,
+        errors=errors,
+    )

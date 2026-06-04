@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
+from app.database import SessionLocal
 from app.fetcher import sync_draws
 from app.logic import generate_candidates
 from app.models import Draw
@@ -24,6 +25,13 @@ scheduler = None
 async def lifespan(app: FastAPI):
     global scheduler
     Base.metadata.create_all(bind=engine)
+    if settings.auto_sync_on_startup:
+        db = SessionLocal()
+        try:
+            if db.query(func.count(Draw.id)).scalar() == 0:
+                sync_draws(db, source=settings.auto_sync_source)
+        finally:
+            db.close()
     if settings.scheduler_enabled:
         scheduler = create_scheduler()
         scheduler.start()
@@ -48,8 +56,12 @@ def _draw_out(draw: Draw) -> DrawOut:
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "version": "6.0.0"}
+def health(db: Session = Depends(get_db)) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "version": "6.0.0",
+        "draw_count": db.query(func.count(Draw.id)).scalar() or 0,
+    }
 
 
 @app.get("/api/stats", response_model=StatsOut)
@@ -73,9 +85,21 @@ def list_draws(
 
 
 @app.post("/api/sync", response_model=SyncResult)
-def sync(issue_count: int | None = Query(default=None, ge=1, le=10000), db: Session = Depends(get_db)) -> SyncResult:
+def sync(
+    issue_count: int | None = Query(default=None, ge=1, le=10000),
+    source: str = Query(default="zhcw", pattern="^(zhcw|cwl)$"),
+    start_page: int = Query(default=1, ge=1, le=300),
+    end_page: int | None = Query(default=None, ge=1, le=300),
+    db: Session = Depends(get_db),
+) -> SyncResult:
     try:
-        return sync_draws(db, issue_count=issue_count)
+        return sync_draws(
+            db,
+            issue_count=issue_count,
+            source=source,
+            start_page=start_page,
+            end_page=end_page,
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"抓取开奖数据失败: {exc}") from exc
 

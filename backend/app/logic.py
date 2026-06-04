@@ -1,183 +1,435 @@
 from __future__ import annotations
 
-import random
+import heapq
 from collections import Counter
 from dataclasses import dataclass
 from itertools import combinations
+from typing import Iterable
 
 from app.models import Draw
 from app.schemas import CandidateOut, FilterConfig
 
 
-@dataclass(frozen=True)
-class Candidate:
-    reds: tuple[int, ...]
-    blue: int
+RED_RANGE = range(1, 34)
+BLUE_RANGE = range(1, 17)
 
-    @property
-    def key(self) -> str:
-        return "-".join(f"{n:02d}" for n in self.reds) + f"+{self.blue:02d}"
+
+@dataclass(frozen=True)
+class RedCandidate:
+    score: float
+    reds: tuple[int, ...]
 
 
 def ac_value(reds: tuple[int, ...] | list[int]) -> int:
-    diffs = {abs(a - b) for a, b in combinations(sorted(reds), 2)}
-    return len(diffs) - (len(reds) - 1)
-
-
-def max_consecutive_run(reds: tuple[int, ...] | list[int]) -> int:
     ordered = sorted(reds)
-    best = current = 1
-    for previous, value in zip(ordered, ordered[1:]):
-        if value == previous + 1:
-            current += 1
-            best = max(best, current)
+    diffs = {
+        ordered[j] - ordered[i]
+        for i in range(len(ordered))
+        for j in range(i + 1, len(ordered))
+    }
+    return len(diffs) - (len(ordered) - 1)
+
+
+def consecutive_summary(reds: Iterable[int]) -> dict[str, object]:
+    ordered = sorted(reds)
+    runs: list[list[int]] = []
+    current = [ordered[0]]
+    for number in ordered[1:]:
+        if number == current[-1] + 1:
+            current.append(number)
         else:
-            current = 1
-    return best
+            if len(current) > 1:
+                runs.append(current)
+            current = [number]
+    if len(current) > 1:
+        runs.append(current)
+
+    if not runs:
+        return {"max_run": 1, "pair_count": 0, "text": "无"}
+
+    return {
+        "max_run": max(len(run) for run in runs),
+        "pair_count": sum(len(run) - 1 for run in runs),
+        "text": "、".join("-".join(f"{number:02d}" for number in run) for run in runs),
+    }
 
 
-def draw_key(reds: list[int], blue: int) -> str:
-    return "-".join(f"{n:02d}" for n in sorted(reds)) + f"+{blue:02d}"
+def same_tail_text(reds: Iterable[int]) -> str:
+    tails = Counter(number % 10 for number in reds)
+    repeated = [f"{tail}尾x{count}" for tail, count in sorted(tails.items()) if count >= 2]
+    return "、".join(repeated) if repeated else "无"
+
+
+def zone_counts(reds: Iterable[int]) -> tuple[int, int, int]:
+    first = second = third = 0
+    for number in reds:
+        if number <= 11:
+            first += 1
+        elif number <= 22:
+            second += 1
+        else:
+            third += 1
+    return first, second, third
+
+
+def red_mask(reds: Iterable[int]) -> int:
+    mask = 0
+    for number in reds:
+        mask |= 1 << int(number)
+    return mask
+
+
+def draw_key(reds: Iterable[int], blue: int) -> str:
+    return "-".join(f"{number:02d}" for number in sorted(reds)) + f"+{blue:02d}"
 
 
 def build_history(draws: list[Draw]) -> dict[str, object]:
-    red_frequency: Counter[int] = Counter()
-    blue_frequency: Counter[int] = Counter()
-    history_keys: set[str] = set()
-
-    for draw in draws:
-        red_frequency.update(draw.reds)
-        blue_frequency.update([draw.blue])
-        history_keys.add(draw_key(draw.reds, draw.blue))
-
+    recent30 = draws[:30]
+    recent100 = draws[:100]
+    all_red_masks = {red_mask(draw.reds) for draw in draws}
+    all_ticket_keys = {draw_key(draw.reds, draw.blue) for draw in draws}
     latest = draws[0] if draws else None
+
     return {
-        "red_frequency": red_frequency,
-        "blue_frequency": blue_frequency,
-        "history_keys": history_keys,
+        "recent30": recent30,
+        "recent100": recent100,
+        "all_draws": draws,
+        "red30": _red_counter(recent30),
+        "red100": _red_counter(recent100),
+        "blue30": _blue_counter(recent30),
+        "blue100": _blue_counter(recent100),
+        "all_red_masks": all_red_masks,
+        "all_ticket_keys": all_ticket_keys,
         "latest_reds": set(latest.reds) if latest else set(),
         "latest_blue": latest.blue if latest else None,
-        "total": len(draws),
     }
 
 
-def passes_filters(candidate: Candidate, filters: FilterConfig, history: dict[str, object]) -> tuple[bool, dict[str, object]]:
-    red_sum = sum(candidate.reds)
-    ac = ac_value(candidate.reds)
-    run = max_consecutive_run(candidate.reds)
+def generate_candidates(
+    draws: list[Draw], filters: FilterConfig, top_n: int, candidate_pool: int
+) -> list[CandidateOut]:
+    history = build_history(draws)
+    required = sorted(set(filters.dan_numbers or []))
+    excluded = set(filters.exclude_numbers or [])
+    kill_tails = set(filters.kill_tails or [])
+
+    if len(required) > 6:
+        return []
+    if any(number not in RED_RANGE for number in required):
+        return []
+    if required and (set(required) & excluded):
+        return []
+    if any(number % 10 in kill_tails for number in required):
+        return []
+
+    allowed_reds = [
+        number
+        for number in RED_RANGE
+        if number not in excluded and number % 10 not in kill_tails
+    ]
+    if any(number not in allowed_reds for number in required):
+        return []
+
+    forbidden_masks = _build_history_forbidden_masks(draws, filters.history_overlap)
+    heap_size = max(top_n * 8, min(candidate_pool, 2000), 200)
+    red_heap: list[tuple[float, tuple[int, ...]]] = []
+
+    optional = [number for number in allowed_reds if number not in required]
+    need = 6 - len(required)
+    for rest in combinations(optional, need):
+        reds = tuple(sorted(required + list(rest)))
+        if not _passes_filters(reds, filters, history, forbidden_masks):
+            continue
+        score = _score_red_only(reds, history)
+        entry = (score, reds)
+        if len(red_heap) < heap_size:
+            heapq.heappush(red_heap, entry)
+        elif entry > red_heap[0]:
+            heapq.heapreplace(red_heap, entry)
+
+    blue_numbers = [
+        number for number in BLUE_RANGE if number not in set(filters.exclude_blues or [])
+    ]
+    scored: list[tuple[float, tuple[int, ...], int]] = []
+    for red_score, reds in red_heap:
+        for blue in blue_numbers:
+            if filters.reject_blue_repeat and blue == history["latest_blue"]:
+                continue
+            if filters.exclude_history and draw_key(reds, blue) in history["all_ticket_keys"]:
+                continue
+            scored.append((red_score + _score_blue_only(blue, history), reds, blue))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [
+        _candidate_out(index, reds, blue, score, history)
+        for index, (score, reds, blue) in enumerate(scored[:top_n], start=1)
+    ]
+
+
+def _passes_filters(
+    reds: tuple[int, ...],
+    filters: FilterConfig,
+    history: dict[str, object],
+    forbidden_masks: set[int],
+) -> bool:
+    red_sum = sum(reds)
+    span = reds[-1] - reds[0]
+    odd_count = sum(1 for number in reds if number % 2)
+    even_count = 6 - odd_count
+    run = int(consecutive_summary(reds)["max_run"])
     latest_reds = history["latest_reds"]
-    latest_blue = history["latest_blue"]
-    red_repeat = len(set(candidate.reds) & latest_reds)
-    blue_repeat = latest_blue == candidate.blue
 
-    if filters.exclude_history and candidate.key in history["history_keys"]:
-        return False, {}
-    if filters.reject_four_consecutive and run >= 4:
-        return False, {}
-    if filters.reject_three_consecutive and run == 3:
-        return False, {}
     if not filters.sum_min <= red_sum <= filters.sum_max:
-        return False, {}
-    if not filters.ac_min <= ac <= filters.ac_max:
-        return False, {}
-    if red_repeat > filters.max_red_repeat:
-        return False, {}
-    if filters.reject_blue_repeat and blue_repeat:
-        return False, {}
-
-    return True, {
-        "sum_value": red_sum,
-        "ac_value": ac,
-        "red_repeat": red_repeat,
-        "blue_repeat": blue_repeat,
-        "run": run,
-    }
-
-
-def _frequency_score(values: tuple[int, ...], frequency: Counter[int], total_draws: int, expected: float) -> float:
-    if total_draws == 0:
-        return 50.0
-    scores = []
-    for value in values:
-        ratio = frequency[value] / max(total_draws, 1)
-        distance = abs(ratio - expected)
-        scores.append(max(0.0, 100.0 - distance * 480.0))
-    return sum(scores) / len(scores)
+        return False
+    if not filters.span_min <= span <= filters.span_max:
+        return False
+    if not filters.ac_min <= ac_value(reds) <= filters.ac_max:
+        return False
+    if filters.odd_even != "any":
+        try:
+            odd, even = [int(part) for part in filters.odd_even.split(":", 1)]
+        except ValueError:
+            return False
+        if (odd_count, even_count) != (odd, even):
+            return False
+    if len(set(reds) & latest_reds) > filters.max_red_repeat:
+        return False
+    if filters.reject_four_consecutive and run >= 4:
+        return False
+    if filters.reject_three_consecutive and run >= 3:
+        return False
+    if not filters.allow_two_consecutive and run >= 2:
+        return False
+    if forbidden_masks and red_mask(reds) in forbidden_masks:
+        return False
+    return True
 
 
-def score_candidate(candidate: Candidate, history: dict[str, object], metrics: dict[str, object]) -> tuple[float, list[str]]:
-    reds = candidate.reds
-    red_frequency = history["red_frequency"]
-    blue_frequency = history["blue_frequency"]
-    total = int(history["total"])
+def _build_history_forbidden_masks(draws: list[Draw], mode: str) -> set[int]:
+    if mode == "none" or not draws:
+        return set()
 
-    freq = _frequency_score(reds, red_frequency, total, expected=6 / 33)
-    blue_freq = _frequency_score((candidate.blue,), blue_frequency, total, expected=1 / 16)
+    exact = {red_mask(draw.reds) for draw in draws}
+    if mode == "exact":
+        return exact
+    if mode != "similar5":
+        return exact
 
-    odd_count = sum(n % 2 for n in reds)
-    odd_even = max(0.0, 100.0 - abs(odd_count - 3) * 18.0)
+    forbidden = set(exact)
+    all_reds = set(RED_RANGE)
+    for draw in draws:
+        draw_reds = tuple(draw.reds)
+        replacements = all_reds - set(draw_reds)
+        for five_numbers in combinations(draw_reds, 5):
+            five_mask = red_mask(five_numbers)
+            for replacement in replacements:
+                forbidden.add(five_mask | (1 << replacement))
+    return forbidden
 
-    zones = [sum(1 for n in reds if 1 <= n <= 11), sum(1 for n in reds if 12 <= n <= 22), sum(1 for n in reds if 23 <= n <= 33)]
-    zone_score = max(0.0, 100.0 - sum(abs(v - 2) for v in zones) * 14.0)
 
-    sum_score = max(0.0, 100.0 - abs(int(metrics["sum_value"]) - 100) * 1.4)
-    ac_score = max(0.0, 100.0 - abs(int(metrics["ac_value"]) - 9) * 9.0)
-    repeat_score = max(0.0, 100.0 - int(metrics["red_repeat"]) * 18.0 - (12.0 if metrics["blue_repeat"] else 0.0))
-    consecutive_score = max(0.0, 100.0 - max(0, int(metrics["run"]) - 1) * 16.0)
-
-    score = (
-        freq * 0.24
-        + blue_freq * 0.08
-        + odd_even * 0.12
-        + zone_score * 0.14
-        + sum_score * 0.16
-        + ac_score * 0.14
-        + repeat_score * 0.08
-        + consecutive_score * 0.04
+def _candidate_out(
+    rank: int,
+    reds: tuple[int, ...],
+    blue: int,
+    score: float,
+    history: dict[str, object],
+) -> CandidateOut:
+    zones = zone_counts(reds)
+    consecutive = consecutive_summary(reds)
+    red_repeat = len(set(reds) & history["latest_reds"])
+    blue_repeat = history["latest_blue"] == blue
+    odd_count = sum(number % 2 for number in reds)
+    reasons = [
+        f"和值{sum(reds)}",
+        f"跨度{reds[-1] - reds[0]}",
+        f"奇偶{odd_count}:{6 - odd_count}",
+        f"三区{zones[0]}:{zones[1]}:{zones[2]}",
+        f"AC{ac_value(reds)}",
+    ]
+    return CandidateOut(
+        rank=rank,
+        reds=list(reds),
+        blue=blue,
+        score=round(score, 2),
+        sum_value=sum(reds),
+        span=reds[-1] - reds[0],
+        odd_even=f"{odd_count}:{6 - odd_count}",
+        zone_ratio=f"{zones[0]}:{zones[1]}:{zones[2]}",
+        ac_value=ac_value(reds),
+        red_repeat=red_repeat,
+        blue_repeat=blue_repeat,
+        consecutive=str(consecutive["text"]),
+        same_tail=same_tail_text(reds),
+        reasons=reasons,
     )
 
-    reasons = [
-        f"红球频率{freq:.1f}",
-        f"奇偶{odd_count}:{6 - odd_count}",
-        f"三区分布{zones[0]}-{zones[1]}-{zones[2]}",
-        f"和值{metrics['sum_value']}",
-        f"AC{metrics['ac_value']}",
-    ]
-    return round(score, 2), reasons
+
+def _red_counter(draws: list[Draw]) -> Counter[int]:
+    counter: Counter[int] = Counter()
+    for draw in draws:
+        counter.update(draw.reds)
+    return counter
 
 
-def generate_candidates(draws: list[Draw], filters: FilterConfig, top_n: int, candidate_pool: int) -> list[CandidateOut]:
-    history = build_history(draws)
-    rng = random.SystemRandom()
-    seen: set[str] = set()
-    scored: list[tuple[float, Candidate, dict[str, object], list[str]]] = []
-    attempts = 0
-    max_attempts = candidate_pool * 8
+def _blue_counter(draws: list[Draw]) -> Counter[int]:
+    counter: Counter[int] = Counter()
+    for draw in draws:
+        counter.update([draw.blue])
+    return counter
 
-    while len(seen) < candidate_pool and attempts < max_attempts:
-        attempts += 1
-        candidate = Candidate(tuple(sorted(rng.sample(range(1, 34), 6))), rng.randint(1, 16))
-        if candidate.key in seen:
-            continue
-        passed, metrics = passes_filters(candidate, filters, history)
-        if not passed:
-            continue
-        seen.add(candidate.key)
-        score, reasons = score_candidate(candidate, history, metrics)
-        scored.append((score, candidate, metrics, reasons))
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [
-        CandidateOut(
-            rank=index + 1,
-            reds=list(candidate.reds),
-            blue=candidate.blue,
-            score=score,
-            sum_value=int(metrics["sum_value"]),
-            ac_value=int(metrics["ac_value"]),
-            red_repeat=int(metrics["red_repeat"]),
-            blue_repeat=bool(metrics["blue_repeat"]),
-            reasons=reasons,
-        )
-        for index, (score, candidate, metrics, reasons) in enumerate(scored[:top_n])
-    ]
+def _score_red_only(reds: tuple[int, ...], history: dict[str, object]) -> float:
+    return round(
+        _hot_score(reds, history["red30"], len(history["recent30"]), 14.0)
+        + _hot_score(reds, history["red100"], len(history["recent100"]), 10.5)
+        + _cold_red_score(reds, history["red30"], 7.0)
+        + _odd_even_score(reds, 8.0)
+        + _zone_score(reds, 8.0)
+        + _sum_score(reds, 12.0)
+        + _span_score(reds, 8.0)
+        + _consecutive_score(reds, 7.0)
+        + _ac_score(reds, 8.0)
+        + _same_tail_score(reds, 5.0)
+        + _last_red_score(reds, history["latest_reds"], 7.0),
+        6,
+    )
+
+
+def _score_blue_only(blue: int, history: dict[str, object]) -> float:
+    return round(
+        _single_hot_score(blue, history["blue30"], len(history["recent30"]), 2.0)
+        + _single_hot_score(blue, history["blue100"], len(history["recent100"]), 1.5)
+        + _cold_blue_score(blue, history["blue30"], 1.0)
+        + _last_blue_score(blue, history["latest_blue"], 1.0),
+        6,
+    )
+
+
+def _hot_score(
+    numbers: Iterable[int], counter: Counter[int], draw_count: int, weight: float
+) -> float:
+    if draw_count == 0:
+        return weight * 0.62
+    max_count = max(counter.values(), default=0)
+    if max_count == 0:
+        return weight * 0.62
+    normalized = sum(counter[number] / max_count for number in numbers) / 6
+    return weight * normalized
+
+
+def _single_hot_score(
+    number: int, counter: Counter[int], draw_count: int, weight: float
+) -> float:
+    if draw_count == 0:
+        return weight * 0.62
+    max_count = max(counter.values(), default=0)
+    if max_count == 0:
+        return weight * 0.62
+    return weight * (counter[number] / max_count)
+
+
+def _cold_red_score(numbers: Iterable[int], counter: Counter[int], weight: float) -> float:
+    if not counter:
+        return weight * 0.6
+    counts = [counter[number] for number in RED_RANGE]
+    cutoff = sorted(counts)[min(9, len(counts) - 1)]
+    cold_hits = sum(1 for number in numbers if counter[number] <= cutoff)
+    score_map = {0: 0.45, 1: 1.0, 2: 0.9, 3: 0.55, 4: 0.25, 5: 0.1, 6: 0.05}
+    return weight * score_map.get(cold_hits, 0.1)
+
+
+def _cold_blue_score(blue: int, counter: Counter[int], weight: float) -> float:
+    if not counter:
+        return weight * 0.6
+    counts = [counter[number] for number in BLUE_RANGE]
+    cutoff = sorted(counts)[min(4, len(counts) - 1)]
+    return weight if counter[blue] <= cutoff else weight * 0.35
+
+
+def _odd_even_score(numbers: Iterable[int], weight: float) -> float:
+    odd_count = sum(1 for number in numbers if number % 2)
+    score_map = {3: 1.0, 2: 0.88, 4: 0.88, 1: 0.48, 5: 0.48, 0: 0.18, 6: 0.18}
+    return weight * score_map[odd_count]
+
+
+def _zone_score(numbers: Iterable[int], weight: float) -> float:
+    zones = zone_counts(numbers)
+    if zones == (2, 2, 2):
+        return weight
+    if max(zones) <= 3 and min(zones) >= 1:
+        return weight * 0.86
+    if max(zones) == 4:
+        return weight * 0.48
+    return weight * 0.22
+
+
+def _sum_score(numbers: Iterable[int], weight: float) -> float:
+    return _band_score(sum(numbers), low=60, ideal_low=86, ideal_high=115, high=140) * weight
+
+
+def _span_score(numbers: Iterable[int], weight: float) -> float:
+    ordered = sorted(numbers)
+    return _band_score(ordered[-1] - ordered[0], low=12, ideal_low=20, ideal_high=29, high=32) * weight
+
+
+def _consecutive_score(numbers: Iterable[int], weight: float) -> float:
+    summary = consecutive_summary(numbers)
+    if int(summary["max_run"]) >= 4:
+        return weight * 0.08
+    if int(summary["max_run"]) == 3:
+        return weight * 0.28
+    if int(summary["pair_count"]) == 1:
+        return weight
+    if int(summary["pair_count"]) == 0:
+        return weight * 0.78
+    return weight * 0.55
+
+
+def _ac_score(numbers: Iterable[int], weight: float) -> float:
+    ac = ac_value(tuple(numbers))
+    if ac in (7, 8, 9):
+        return weight
+    if ac in (6, 10):
+        return weight * 0.82
+    if ac in (5, 11):
+        return weight * 0.56
+    return weight * 0.25
+
+
+def _same_tail_score(numbers: Iterable[int], weight: float) -> float:
+    tail_counts = Counter(number % 10 for number in numbers)
+    max_tail = max(tail_counts.values())
+    repeated_groups = sum(1 for count in tail_counts.values() if count >= 2)
+    if max_tail == 1:
+        return weight * 0.86
+    if max_tail == 2 and repeated_groups <= 2:
+        return weight
+    if max_tail == 2:
+        return weight * 0.72
+    if max_tail == 3:
+        return weight * 0.32
+    return weight * 0.1
+
+
+def _last_red_score(numbers: Iterable[int], latest_reds: set[int], weight: float) -> float:
+    if not latest_reds:
+        return weight * 0.62
+    overlap = len(set(numbers) & latest_reds)
+    score_map = {0: 0.72, 1: 1.0, 2: 0.9, 3: 0.45, 4: 0.15, 5: 0.05, 6: 0.0}
+    return weight * score_map[overlap]
+
+
+def _last_blue_score(blue: int, latest_blue: int | None, weight: float) -> float:
+    if latest_blue is None:
+        return weight * 0.62
+    return weight * (0.25 if blue == latest_blue else 1.0)
+
+
+def _band_score(value: int, low: int, ideal_low: int, ideal_high: int, high: int) -> float:
+    if value < low or value > high:
+        return 0.08
+    if ideal_low <= value <= ideal_high:
+        return 1.0
+    if value < ideal_low:
+        return 0.08 + 0.92 * ((value - low) / max(1, ideal_low - low))
+    return 0.08 + 0.92 * ((high - value) / max(1, high - ideal_high))

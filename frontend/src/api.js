@@ -18,6 +18,9 @@ const api = async (path, options = {}) => {
 
 export const getStats = () => api('/api/stats')
 export const getDraws = () => api('/api/draws?limit=30')
-export const syncDraws = () => api('/api/sync', { method: 'POST' })
+export const syncDraws = (params = {}) => {
+  const query = new URLSearchParams(params).toString()
+  return api(`/api/sync${query ? `?${query}` : ''}`, { method: 'POST' })
+}
 export const generateTop = (payload) =>
   api('/api/generate', { method: 'POST', body: JSON.stringify(payload) })

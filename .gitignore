@@ -12,5 +12,16 @@ backend/static/
 
 .local/
 ssq.db
+ssq_ai.sqlite3
+generated_numbers.csv
 postgres_data/
 *.log
+
+# Legacy local Flask files may remain for comparison, but runtime artifacts stay ignored.
+/app.py
+/db.py
+/fetcher.py
+/model.py
+/requirements.txt
+/templates/
+/static/

@@ -9,18 +9,33 @@ const candidates = ref([])
 const loading = ref('')
 const error = ref('')
 const lastSync = ref(null)
+const numberText = reactive({
+  exclude_numbers: '',
+  exclude_blues: '',
+  dan_numbers: '',
+  kill_tails: '',
+})
 
 const form = reactive({
   top_n: 50,
-  candidate_pool: 20000,
+  candidate_pool: 50000,
   filters: {
     exclude_history: true,
+    history_overlap: 'similar5',
+    exclude_numbers: [],
+    exclude_blues: [],
+    dan_numbers: [],
+    kill_tails: [],
     reject_three_consecutive: true,
     reject_four_consecutive: true,
+    allow_two_consecutive: true,
     sum_min: 70,
     sum_max: 130,
+    span_min: 14,
+    span_max: 32,
     ac_min: 7,
     ac_max: 12,
+    odd_even: 'any',
     max_red_repeat: 2,
     reject_blue_repeat: false,
   },
@@ -44,6 +59,14 @@ const withLoading = async (text, fn) => {
   }
 }
 
+const parseNumberList = (text, min, max) =>
+  String(text || '')
+    .split(/[\s,，、;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => Number(item))
+    .filter((item) => Number.isInteger(item) && item >= min && item <= max)
+
 const refresh = async () => {
   const [statsPayload, drawsPayload] = await Promise.all([getStats(), getDraws()])
   stats.value = statsPayload
@@ -51,13 +74,17 @@ const refresh = async () => {
 }
 
 const handleSync = () =>
-  withLoading('正在同步开奖数据', async () => {
-    lastSync.value = await syncDraws()
+  withLoading('正在同步中彩网历史开奖', async () => {
+    lastSync.value = await syncDraws({ source: 'zhcw' })
     await refresh()
   })
 
 const handleGenerate = () =>
   withLoading('正在生成 Top50', async () => {
+    form.filters.exclude_numbers = parseNumberList(numberText.exclude_numbers, 1, 33)
+    form.filters.exclude_blues = parseNumberList(numberText.exclude_blues, 1, 16)
+    form.filters.dan_numbers = parseNumberList(numberText.dan_numbers, 1, 33)
+    form.filters.kill_tails = parseNumberList(numberText.kill_tails, 0, 9)
     candidates.value = await generateTop(form)
   })
 
@@ -114,11 +141,41 @@ onMounted(() => {
           <label>候选池</label>
           <input v-model.number="form.candidate_pool" type="number" min="100" max="200000" />
         </div>
+        <div class="field-row">
+          <label>历史排除</label>
+          <select v-model="form.filters.history_overlap">
+            <option value="similar5">排除历史5+重合</option>
+            <option value="exact">排除历史6红相同</option>
+            <option value="none">不限制</option>
+          </select>
+        </div>
+        <div class="text-field">
+          <label>排除红球</label>
+          <input v-model="numberText.exclude_numbers" placeholder="如：02 11 25" />
+        </div>
+        <div class="text-field">
+          <label>胆码</label>
+          <input v-model="numberText.dan_numbers" placeholder="如：05 12" />
+        </div>
+        <div class="text-field">
+          <label>杀尾号</label>
+          <input v-model="numberText.kill_tails" placeholder="如：0 4 9" />
+        </div>
+        <div class="text-field">
+          <label>排除蓝球</label>
+          <input v-model="numberText.exclude_blues" placeholder="如：02 13" />
+        </div>
         <div class="range-row">
           <label>和值</label>
           <input v-model.number="form.filters.sum_min" type="number" />
           <span>至</span>
           <input v-model.number="form.filters.sum_max" type="number" />
+        </div>
+        <div class="range-row">
+          <label>跨度</label>
+          <input v-model.number="form.filters.span_min" type="number" />
+          <span>至</span>
+          <input v-model.number="form.filters.span_max" type="number" />
         </div>
         <div class="range-row">
           <label>AC值</label>
@@ -127,10 +184,22 @@ onMounted(() => {
           <input v-model.number="form.filters.ac_max" type="number" />
         </div>
         <div class="field-row">
+          <label>奇偶结构</label>
+          <select v-model="form.filters.odd_even">
+            <option value="any">不限</option>
+            <option value="3:3">3:3</option>
+            <option value="4:2">4:2</option>
+            <option value="2:4">2:4</option>
+            <option value="5:1">5:1</option>
+            <option value="1:5">1:5</option>
+          </select>
+        </div>
+        <div class="field-row">
           <label>最大重红</label>
           <input v-model.number="form.filters.max_red_repeat" type="number" min="0" max="6" />
         </div>
         <label class="check"><input v-model="form.filters.exclude_history" type="checkbox" />排除历史号码</label>
+        <label class="check"><input v-model="form.filters.allow_two_consecutive" type="checkbox" />允许2连号</label>
         <label class="check"><input v-model="form.filters.reject_three_consecutive" type="checkbox" />排除3连号</label>
         <label class="check"><input v-model="form.filters.reject_four_consecutive" type="checkbox" />排除4连号</label>
         <label class="check"><input v-model="form.filters.reject_blue_repeat" type="checkbox" />排除重蓝</label>
@@ -150,8 +219,13 @@ onMounted(() => {
                 <th>蓝球</th>
                 <th>评分</th>
                 <th>和值</th>
+                <th>跨度</th>
+                <th>奇偶</th>
+                <th>三区</th>
                 <th>AC</th>
                 <th>重红</th>
+                <th>连号</th>
+                <th>同尾</th>
                 <th>说明</th>
               </tr>
             </thead>
@@ -164,12 +238,17 @@ onMounted(() => {
                 <td><span class="ball blue">{{ String(item.blue).padStart(2, '0') }}</span></td>
                 <td class="score">{{ item.score }}</td>
                 <td>{{ item.sum_value }}</td>
+                <td>{{ item.span }}</td>
+                <td>{{ item.odd_even }}</td>
+                <td>{{ item.zone_ratio }}</td>
                 <td>{{ item.ac_value }}</td>
                 <td>{{ item.red_repeat }}</td>
+                <td>{{ item.consecutive }}</td>
+                <td>{{ item.same_tail }}</td>
                 <td class="reasons">{{ item.reasons.join(' / ') }}</td>
               </tr>
               <tr v-if="!candidates.length">
-                <td colspan="8" class="empty">点击 AI评分 Top50 生成号码</td>
+                <td colspan="12" class="empty">点击 AI评分 Top50 生成号码</td>
               </tr>
             </tbody>
           </table>
