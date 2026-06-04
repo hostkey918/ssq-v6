@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import re
 import time
 import urllib.parse
 import urllib.request
 from datetime import date
+from pathlib import Path
 
 import requests
 from dateutil.parser import parse
@@ -16,6 +18,7 @@ from app.schemas import SyncResult
 
 CWL_URL = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
 ZHCW_SSQ_URL = "https://kaijiang.zhcw.com/zhcw/inc/ssq/ssq_wqhg.jsp"
+SEED_CSV_PATH = Path(__file__).resolve().parent / "data" / "ssq_draws_seed.csv"
 ZHCW_ROW_RE = re.compile(
     r"<tr>\s*"
     r"<td[^>]*>\s*(?P<date>\d{4}-\d{2}-\d{2})\s*</td>\s*"
@@ -64,6 +67,26 @@ def fetch_cwl_draws(issue_count: int | None = None) -> list[dict[str, object]]:
                 "source": "cwl",
             }
         )
+    return draws
+
+
+def fetch_seed_draws(seed_path: Path = SEED_CSV_PATH) -> list[dict[str, object]]:
+    if not seed_path.exists():
+        return []
+
+    draws: list[dict[str, object]] = []
+    with seed_path.open(newline="", encoding="utf-8") as csv_file:
+        for row in csv.DictReader(csv_file):
+            reds = [int(row[f"r{i}"]) for i in range(1, 7)]
+            draws.append(
+                {
+                    "issue": str(row["issue"]),
+                    "draw_date": _parse_date(row.get("date")),
+                    "reds": sorted(reds),
+                    "blue": int(row["b"]),
+                    "source": "seed",
+                }
+            )
     return draws
 
 
@@ -155,6 +178,8 @@ def sync_draws(
     errors: list[str] = []
     if source == "cwl":
         rows = fetch_cwl_draws(issue_count)
+    elif source == "seed":
+        rows = fetch_seed_draws()
     else:
         rows, pages_ok, errors = fetch_zhcw_draws(start_page=start_page, end_page=end_page)
 

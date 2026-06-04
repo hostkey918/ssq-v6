@@ -9,6 +9,7 @@
 - Vue3 管理后台
 - Docker / Docker Compose
 - 中彩网历史开奖分页抓取
+- 内置历史开奖 seed CSV，云端空库可自动初始化
 - AI v6 确定性候选池枚举排序
 
 本系统是“数据分析 + 缩水排序工具”，不是预测器，不承诺命中结果。
@@ -17,6 +18,7 @@
 
 - 同步中彩网双色球历史开奖分页数据
 - 保留中国福彩网接口同步作为备选数据源
+- 支持从内置 `backend/app/data/ssq_draws_seed.csv` 导入历史开奖
 - 自动建表并写入 `draws`
 - 最近开奖和数据统计
 - 排除历史已开号码
@@ -49,7 +51,7 @@ docker compose up --build
 http://localhost:8000
 ```
 
-首次进入后台后点击“同步历史开奖”，再点击“AI评分 Top50”。
+首次启动会在空库时自动导入内置历史开奖 seed。也可以在后台点击“同步历史开奖”刷新数据。
 
 ## 本地 SQLite 开发模式
 
@@ -95,6 +97,7 @@ npm run dev
 - `GET /api/health`
 - `GET /api/stats`
 - `GET /api/draws?limit=30`
+- `POST /api/sync?source=seed`
 - `POST /api/sync?source=zhcw`
 - `POST /api/sync?source=cwl&issue_count=3000`
 - `POST /api/generate`
@@ -115,7 +118,7 @@ npm run dev
    - `ssq-v6` Web Service
    - `ssq-v6-db` Free Postgres
 6. 部署完成后打开 Web Service URL。
-7. 点击“同步历史开奖”导入历史库。
+7. 空库会自动导入内置历史开奖 seed；如果上游可访问，也可以点击“同步历史开奖”刷新到最新分页数据。
 
 ### Koyeb
 
@@ -126,16 +129,18 @@ DATABASE_URL=<你的 Koyeb Postgres 连接串>
 SCHEDULER_ENABLED=false
 AUTO_SYNC_ON_STARTUP=false
 AUTO_SYNC_SOURCE=zhcw
+SEED_DRAWS_ON_STARTUP=true
 CORS_ORIGINS=*
 ```
 
-部署完成后同样在页面点击“同步历史开奖”。
+部署完成后会自动初始化 seed 历史库，也可以在页面点击“同步历史开奖”刷新。
 
 ## 环境变量
 
 ```text
 DATABASE_URL=postgresql+psycopg2://ssq:ssq@localhost:5432/ssq
 FETCH_ISSUE_COUNT=3000
+SEED_DRAWS_ON_STARTUP=true
 AUTO_SYNC_ON_STARTUP=false
 AUTO_SYNC_SOURCE=zhcw
 SCHEDULER_ENABLED=true

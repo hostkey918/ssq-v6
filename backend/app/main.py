@@ -26,6 +26,13 @@ scheduler = None
 async def lifespan(app: FastAPI):
     global scheduler
     Base.metadata.create_all(bind=engine)
+    if settings.seed_draws_on_startup:
+        db = SessionLocal()
+        try:
+            if db.query(func.count(Draw.id)).scalar() == 0:
+                sync_draws(db, source="seed")
+        finally:
+            db.close()
     if settings.auto_sync_on_startup:
         db = SessionLocal()
         try:
@@ -90,7 +97,7 @@ def list_draws(
 @app.post("/api/sync", response_model=SyncResult)
 def sync(
     issue_count: int | None = Query(default=None, ge=1, le=10000),
-    source: str = Query(default="zhcw", pattern="^(zhcw|cwl)$"),
+    source: str = Query(default="zhcw", pattern="^(zhcw|cwl|seed)$"),
     start_page: int = Query(default=1, ge=1, le=300),
     end_page: int | None = Query(default=None, ge=1, le=300),
     db: Session = Depends(get_db),

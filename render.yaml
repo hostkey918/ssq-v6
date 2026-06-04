@@ -11,6 +11,8 @@ services:
           property: connectionString
       - key: SCHEDULER_ENABLED
         value: "false"
+      - key: SEED_DRAWS_ON_STARTUP
+        value: "true"
       - key: AUTO_SYNC_ON_STARTUP
         value: "false"
       - key: AUTO_SYNC_SOURCE

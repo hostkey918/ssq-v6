@@ -11,6 +11,7 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     fetch_issue_count: int = Field(default=3000, alias="FETCH_ISSUE_COUNT")
+    seed_draws_on_startup: bool = Field(default=True, alias="SEED_DRAWS_ON_STARTUP")
     auto_sync_on_startup: bool = Field(default=False, alias="AUTO_SYNC_ON_STARTUP")
     auto_sync_source: str = Field(default="zhcw", alias="AUTO_SYNC_SOURCE")
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
