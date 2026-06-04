@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -60,6 +61,8 @@ def health(db: Session = Depends(get_db)) -> dict[str, object]:
     return {
         "status": "ok",
         "version": "6.0.0",
+        "commit": os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT") or None,
+        "branch": os.getenv("RENDER_GIT_BRANCH") or None,
         "draw_count": db.query(func.count(Draw.id)).scalar() or 0,
     }
 
