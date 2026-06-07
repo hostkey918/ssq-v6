@@ -1,4 +1,4 @@
-# 双色球 AI V6.0
+# 双色球 AI V7.0
 
 这是一个合并版双色球数据分析、历史抓取、缩水过滤和 AI 排序系统。
 
@@ -10,7 +10,7 @@
 - Docker / Docker Compose
 - 中彩网历史开奖分页抓取
 - 内置历史开奖 seed CSV，云端空库可自动初始化
-- AI v6 确定性候选池枚举排序
+- AI v7 历史统计 + 外部信号融合排序
 
 本系统是“数据分析 + 缩水排序工具”，不是预测器，不承诺命中结果。
 
@@ -19,12 +19,14 @@
 - 同步中彩网双色球历史开奖分页数据
 - 保留中国福彩网接口同步作为备选数据源
 - 支持从内置 `backend/app/data/ssq_draws_seed.csv` 导入历史开奖
+- 支持抓取/粘贴专家分析文本，解析红胆、杀号、蓝胆、杀蓝、杀尾
+- 外部信号只作为软权重参与评分，不会因为某个杀号直接硬排除号码
 - 自动建表并写入 `draws`
 - 最近开奖和数据统计
 - 排除历史已开号码
 - 支持强历史排除：排除与任意历史红球 `5+` 重合的组合
 - 支持排除号码、胆码、杀尾、和值、跨度、奇偶、AC、重号、连号等规则
-- AI v6 评分项：
+- AI v7 评分项：
   - 近30期热号
   - 近100期中期热号
   - 冷号回补
@@ -36,6 +38,7 @@
   - AC值
   - 同尾
   - 上期重号
+  - 外部红胆/杀号/蓝胆/杀蓝/杀尾共识权重
 - Vue3 中文管理后台
 - Docker 一键部署
 
@@ -100,6 +103,9 @@ npm run dev
 - `POST /api/sync?source=seed`
 - `POST /api/sync?source=zhcw`
 - `POST /api/sync?source=cwl&issue_count=3000`
+- `GET /api/expert-signals/consensus`
+- `POST /api/expert-signals/fetch`
+- `POST /api/expert-signals/import`
 - `POST /api/generate`
 
 ## 免费云端部署
@@ -130,6 +136,7 @@ SCHEDULER_ENABLED=false
 AUTO_SYNC_ON_STARTUP=false
 AUTO_SYNC_SOURCE=zhcw
 SEED_DRAWS_ON_STARTUP=true
+EXPERT_SOURCE_URLS=https://m.78500.cn/ssq/hz.html
 CORS_ORIGINS=*
 ```
 
@@ -140,6 +147,7 @@ CORS_ORIGINS=*
 ```text
 DATABASE_URL=postgresql+psycopg2://ssq:ssq@localhost:5432/ssq
 FETCH_ISSUE_COUNT=3000
+EXPERT_SOURCE_URLS=https://m.78500.cn/ssq/hz.html
 SEED_DRAWS_ON_STARTUP=true
 AUTO_SYNC_ON_STARTUP=false
 AUTO_SYNC_SOURCE=zhcw

@@ -5,12 +5,16 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "SSQ V6.0"
+    app_name: str = "SSQ V7.0"
     database_url: str = Field(
         default="postgresql+psycopg2://ssq:ssq@localhost:5432/ssq",
         alias="DATABASE_URL",
     )
     fetch_issue_count: int = Field(default=3000, alias="FETCH_ISSUE_COUNT")
+    expert_source_urls: str = Field(
+        default="https://m.78500.cn/ssq/hz.html",
+        alias="EXPERT_SOURCE_URLS",
+    )
     seed_draws_on_startup: bool = Field(default=True, alias="SEED_DRAWS_ON_STARTUP")
     auto_sync_on_startup: bool = Field(default=False, alias="AUTO_SYNC_ON_STARTUP")
     auto_sync_source: str = Field(default="zhcw", alias="AUTO_SYNC_SOURCE")

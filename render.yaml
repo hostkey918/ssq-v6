@@ -13,6 +13,8 @@ services:
         value: "false"
       - key: SEED_DRAWS_ON_STARTUP
         value: "true"
+      - key: EXPERT_SOURCE_URLS
+        value: "https://m.78500.cn/ssq/hz.html"
       - key: AUTO_SYNC_ON_STARTUP
         value: "false"
       - key: AUTO_SYNC_SOURCE

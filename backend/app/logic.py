@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Iterable
 
+from app.expert import parse_compact_numbers
 from app.models import Draw
 from app.schemas import CandidateOut, FilterConfig
 
@@ -98,7 +99,11 @@ def draw_key(reds: Iterable[int], blue: int) -> str:
     return "-".join(f"{number:02d}" for number in sorted(reds)) + f"+{blue:02d}"
 
 
-def build_history(draws: list[Draw]) -> dict[str, object]:
+def build_history(
+    draws: list[Draw],
+    filters: FilterConfig,
+    expert_signals: list[object] | None = None,
+) -> dict[str, object]:
     recent30 = draws[:30]
     recent100 = draws[:100]
     all_red_masks = {red_mask(draw.reds) for draw in draws}
@@ -119,13 +124,18 @@ def build_history(draws: list[Draw]) -> dict[str, object]:
         "latest_reds": set(latest.reds) if latest else set(),
         "latest_red_mask": latest_red_mask,
         "latest_blue": latest.blue if latest else None,
+        "expert_profile": _build_expert_profile(expert_signals or [], filters),
     }
 
 
 def generate_candidates(
-    draws: list[Draw], filters: FilterConfig, top_n: int, candidate_pool: int
+    draws: list[Draw],
+    filters: FilterConfig,
+    top_n: int,
+    candidate_pool: int,
+    expert_signals: list[object] | None = None,
 ) -> list[CandidateOut]:
-    history = build_history(draws)
+    history = build_history(draws, filters, expert_signals)
     required = sorted(set(filters.dan_numbers or []))
     excluded = set(filters.exclude_numbers or [])
     kill_tails = set(filters.kill_tails or [])
@@ -159,7 +169,7 @@ def generate_candidates(
             reds = tuple(sorted(required + list(rest)))
             if not _passes_filters(reds, filters, history, forbidden_masks):
                 continue
-            score = _score_red_only(reds, history)
+            score = _score_red_only(reds, history, filters)
             entry = (score, reds)
             if len(red_heap) < heap_size:
                 heapq.heappush(red_heap, entry)
@@ -178,7 +188,7 @@ def generate_candidates(
                 continue
             if filters.exclude_history and draw_key(reds, blue) in history["all_ticket_keys"]:
                 continue
-            scored.append((red_score + _score_blue_only(blue, history), reds, blue))
+            scored.append((red_score + _score_blue_only(blue, history, filters), reds, blue))
 
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return [
@@ -274,6 +284,93 @@ def _single_red_priority(number: int, history: dict[str, object]) -> float:
     return hot30 * 14.0 + hot100 * 10.5 + cold * 7.0 + latest * 7.0
 
 
+def _build_expert_profile(signals: list[object], filters: FilterConfig) -> dict[str, object]:
+    counters: dict[str, Counter[int]] = {
+        "red_dan": Counter(),
+        "red_kill": Counter(),
+        "blue_dan": Counter(),
+        "blue_kill": Counter(),
+        "kill_tails": Counter(),
+    }
+    if filters.use_expert_signals:
+        for signal in signals[:30]:
+            weight = float(getattr(signal, "weight", 1.0) or 1.0)
+            for number in parse_compact_numbers(getattr(signal, "red_dan", ""), 1, 33):
+                counters["red_dan"][number] += weight
+            for number in parse_compact_numbers(getattr(signal, "red_kill", ""), 1, 33):
+                counters["red_kill"][number] += weight
+            for number in parse_compact_numbers(getattr(signal, "blue_dan", ""), 1, 16):
+                counters["blue_dan"][number] += weight
+            for number in parse_compact_numbers(getattr(signal, "blue_kill", ""), 1, 16):
+                counters["blue_kill"][number] += weight
+            for number in parse_compact_numbers(getattr(signal, "kill_tails", ""), 0, 9):
+                counters["kill_tails"][number] += weight
+
+    manual_weight = 1.5
+    for number in filters.soft_red_dan:
+        if number in RED_RANGE:
+            counters["red_dan"][number] += manual_weight
+    for number in filters.soft_red_kill:
+        if number in RED_RANGE:
+            counters["red_kill"][number] += manual_weight
+    for number in filters.soft_blue_dan:
+        if number in BLUE_RANGE:
+            counters["blue_dan"][number] += manual_weight
+    for number in filters.soft_blue_kill:
+        if number in BLUE_RANGE:
+            counters["blue_kill"][number] += manual_weight
+    for number in filters.soft_kill_tails:
+        if 0 <= number <= 9:
+            counters["kill_tails"][number] += manual_weight
+
+    return {
+        "red_dan": counters["red_dan"],
+        "red_kill": counters["red_kill"],
+        "blue_dan": counters["blue_dan"],
+        "blue_kill": counters["blue_kill"],
+        "kill_tails": counters["kill_tails"],
+        "max_red_dan": max(counters["red_dan"].values(), default=0),
+        "max_red_kill": max(counters["red_kill"].values(), default=0),
+        "max_blue_dan": max(counters["blue_dan"].values(), default=0),
+        "max_blue_kill": max(counters["blue_kill"].values(), default=0),
+        "max_kill_tail": max(counters["kill_tails"].values(), default=0),
+    }
+
+
+def _normalized_counter_value(counter: Counter[int], max_value: float, number: int) -> float:
+    if not max_value:
+        return 0.0
+    return counter[number] / max_value
+
+
+def _expert_red_score(reds: tuple[int, ...], profile: dict[str, object], weight: float) -> float:
+    if not weight:
+        return 0.0
+    dan = sum(
+        _normalized_counter_value(profile["red_dan"], float(profile["max_red_dan"]), number)
+        for number in reds
+    ) / 6
+    kill = sum(
+        _normalized_counter_value(profile["red_kill"], float(profile["max_red_kill"]), number)
+        for number in reds
+    ) / 6
+    tail_kill = sum(
+        _normalized_counter_value(profile["kill_tails"], float(profile["max_kill_tail"]), number % 10)
+        for number in reds
+    ) / 6
+    raw = dan * 0.8 - kill * 0.7 - tail_kill * 0.45
+    return max(-weight, min(weight, weight * raw))
+
+
+def _expert_blue_score(blue: int, profile: dict[str, object], weight: float) -> float:
+    if not weight:
+        return 0.0
+    dan = _normalized_counter_value(profile["blue_dan"], float(profile["max_blue_dan"]), blue)
+    kill = _normalized_counter_value(profile["blue_kill"], float(profile["max_blue_kill"]), blue)
+    raw = dan * 0.65 - kill * 0.8
+    return max(-weight, min(weight, weight * raw))
+
+
 def _build_history_forbidden_masks(draws: list[Draw], mode: str) -> set[int]:
     if mode == "none" or not draws:
         return set()
@@ -315,11 +412,17 @@ def _candidate_out(
         f"三区{zones[0]}:{zones[1]}:{zones[2]}",
         f"AC{ac_value(reds)}",
     ]
+    expert_score = _expert_red_score(reds, history["expert_profile"], 1.0) + _expert_blue_score(
+        blue, history["expert_profile"], 1.0
+    )
+    if expert_score:
+        reasons.append(f"外部信号{expert_score:+.2f}")
     return CandidateOut(
         rank=rank,
         reds=list(reds),
         blue=blue,
         score=round(score, 2),
+        expert_score=round(expert_score, 2),
         sum_value=sum(reds),
         span=reds[-1] - reds[0],
         odd_even=f"{odd_count}:{6 - odd_count}",
@@ -347,7 +450,7 @@ def _blue_counter(draws: list[Draw]) -> Counter[int]:
     return counter
 
 
-def _score_red_only(reds: tuple[int, ...], history: dict[str, object]) -> float:
+def _score_red_only(reds: tuple[int, ...], history: dict[str, object], filters: FilterConfig) -> float:
     return round(
         _hot_score(reds, history["red30"], len(history["recent30"]), 14.0)
         + _hot_score(reds, history["red100"], len(history["recent100"]), 10.5)
@@ -359,17 +462,19 @@ def _score_red_only(reds: tuple[int, ...], history: dict[str, object]) -> float:
         + _consecutive_score(reds, 7.0)
         + _ac_score(reds, 8.0)
         + _same_tail_score(reds, 5.0)
-        + _last_red_score(reds, history["latest_reds"], 7.0),
+        + _last_red_score(reds, history["latest_reds"], 7.0)
+        + _expert_red_score(reds, history["expert_profile"], filters.expert_weight),
         6,
     )
 
 
-def _score_blue_only(blue: int, history: dict[str, object]) -> float:
+def _score_blue_only(blue: int, history: dict[str, object], filters: FilterConfig) -> float:
     return round(
         _single_hot_score(blue, history["blue30"], len(history["recent30"]), 2.0)
         + _single_hot_score(blue, history["blue100"], len(history["recent100"]), 1.5)
         + _cold_blue_score(blue, history["blue30"], 1.0)
-        + _last_blue_score(blue, history["latest_blue"], 1.0),
+        + _last_blue_score(blue, history["latest_blue"], 1.0)
+        + _expert_blue_score(blue, history["expert_profile"], filters.expert_weight),
         6,
     )
 

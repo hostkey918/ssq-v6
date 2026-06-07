@@ -24,3 +24,8 @@ export const syncDraws = (params = {}) => {
 }
 export const generateTop = (payload) =>
   api('/api/generate', { method: 'POST', body: JSON.stringify(payload) })
+export const fetchExpertSignals = (payload = {}) =>
+  api('/api/expert-signals/fetch', { method: 'POST', body: JSON.stringify(payload) })
+export const importExpertSignal = (payload) =>
+  api('/api/expert-signals/import', { method: 'POST', body: JSON.stringify(payload) })
+export const getExpertConsensus = () => api('/api/expert-signals/consensus')

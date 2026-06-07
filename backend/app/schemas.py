@@ -38,6 +38,13 @@ class FilterConfig(BaseModel):
     odd_even: str = "any"
     max_red_repeat: int = 2
     reject_blue_repeat: bool = False
+    use_expert_signals: bool = True
+    expert_weight: float = Field(default=6.0, ge=0, le=20)
+    soft_red_dan: list[int] = Field(default_factory=list)
+    soft_red_kill: list[int] = Field(default_factory=list)
+    soft_blue_dan: list[int] = Field(default_factory=list)
+    soft_blue_kill: list[int] = Field(default_factory=list)
+    soft_kill_tails: list[int] = Field(default_factory=list)
 
 
 class GenerateRequest(BaseModel):
@@ -51,6 +58,7 @@ class CandidateOut(BaseModel):
     reds: list[int]
     blue: int
     score: float
+    expert_score: float = 0.0
     sum_value: int
     span: int
     odd_even: str
@@ -67,3 +75,43 @@ class StatsOut(BaseModel):
     total_draws: int
     latest_issue: str | None
     latest_date: date | None
+
+
+class ExpertSignalIn(BaseModel):
+    source: str = "manual"
+    issue: str | None = None
+    text: str = Field(min_length=2)
+    weight: float = Field(default=1.0, ge=0.1, le=5.0)
+
+
+class ExpertFetchRequest(BaseModel):
+    urls: list[str] = Field(default_factory=list, max_length=5)
+    issue: str | None = None
+    weight: float = Field(default=1.0, ge=0.1, le=5.0)
+
+
+class ExpertSignalOut(BaseModel):
+    id: int
+    issue: str | None
+    source: str
+    source_url: str | None
+    red_dan: list[int]
+    red_kill: list[int]
+    blue_dan: list[int]
+    blue_kill: list[int]
+    kill_tails: list[int]
+    weight: float
+
+
+class NumberWeight(BaseModel):
+    number: int
+    weight: float
+
+
+class ExpertConsensusOut(BaseModel):
+    total_signals: int
+    red_dan: list[NumberWeight]
+    red_kill: list[NumberWeight]
+    blue_dan: list[NumberWeight]
+    blue_kill: list[NumberWeight]
+    kill_tails: list[NumberWeight]
