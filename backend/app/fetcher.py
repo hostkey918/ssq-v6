@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from html import unescape
 from pathlib import Path
+from typing import Iterable
 
 import requests
 from dateutil.parser import parse
@@ -23,6 +24,15 @@ CWL_URL = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNoti
 ZHCW_SSQ_URL = "https://kaijiang.zhcw.com/zhcw/inc/ssq/ssq_wqhg.jsp"
 YDN_OPENING_URL = "http://www.ydniu.com/open/ssqkjh.html"
 SEED_CSV_PATH = Path(__file__).resolve().parent / "data" / "ssq_draws_seed.csv"
+CWL_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.cwl.gov.cn/ygkj/wqkjgg/ssq/",
+    "X-Requested-With": "XMLHttpRequest",
+}
 ZHCW_ROW_RE = re.compile(
     r"<tr>\s*"
     r"<td[^>]*>\s*(?P<date>\d{4}-\d{2}-\d{2})\s*</td>\s*"
@@ -72,7 +82,7 @@ def fetch_cwl_draws(issue_count: int | None = None) -> list[dict[str, object]]:
     response = requests.get(
         CWL_URL,
         params=params,
-        headers={"User-Agent": "SSQ-V6/1.0"},
+        headers=CWL_HEADERS,
         timeout=20,
     )
     response.raise_for_status()
@@ -101,6 +111,7 @@ def fetch_latest_draws(issue_count: int | None = None) -> tuple[list[dict[str, o
     errors: list[str] = []
     for source_name, fetch in (
         ("cwl", lambda: fetch_cwl_draws(count)),
+        ("ydniu", lambda: fetch_ydniu_draws(count)),
         ("zhcw", lambda: fetch_zhcw_draws(start_page=1, end_page=1)[0]),
     ):
         try:
@@ -111,6 +122,30 @@ def fetch_latest_draws(issue_count: int | None = None) -> tuple[list[dict[str, o
         except Exception as exc:
             errors.append(f"{source_name}: {exc}")
     return [], errors
+
+
+def fetch_ydniu_draws(issue_count: int | None = None) -> list[dict[str, object]]:
+    response = requests.get(
+        YDN_OPENING_URL,
+        headers={
+            "User-Agent": CWL_HEADERS["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Connection": "close",
+        },
+        timeout=(3, 8),
+    )
+    response.raise_for_status()
+    response.encoding = response.apparent_encoding or response.encoding
+    rows = parse_ydniu_draws_page(response.text)
+    return rows[: issue_count or len(rows)]
+
+
+def parse_ydniu_draws_page(html: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for payload in _iter_json_ld_payloads(html):
+        _collect_ydniu_draws(payload, rows)
+    rows.sort(key=lambda row: str(row["issue"]), reverse=True)
+    return rows
 
 
 def fetch_latest_opening_number() -> OpeningNumber | None:
@@ -132,12 +167,7 @@ def fetch_latest_opening_number() -> OpeningNumber | None:
 
 
 def parse_opening_number_page(html: str) -> OpeningNumber | None:
-    for match in SCRIPT_JSON_RE.finditer(html):
-        script = unescape(match.group("body")).strip()
-        try:
-            payload = json.loads(script)
-        except json.JSONDecodeError:
-            continue
+    for payload in _iter_json_ld_payloads(html):
         opening = _find_opening_number(payload)
         if opening:
             return opening
@@ -151,6 +181,41 @@ def parse_opening_number_page(html: str) -> OpeningNumber | None:
         reds=sorted(int(value) for value in fallback.group("reds").split()),
         blue=int(fallback.group("blue")),
     )
+
+
+def _iter_json_ld_payloads(html: str) -> Iterable[object]:
+    for match in SCRIPT_JSON_RE.finditer(html):
+        script = unescape(match.group("body")).strip()
+        try:
+            yield json.loads(script)
+        except json.JSONDecodeError:
+            continue
+
+
+def _collect_ydniu_draws(node: object, rows: list[dict[str, object]]) -> None:
+    if isinstance(node, dict):
+        winning = node.get("winningNumber")
+        reds = winning.get("redBalls") if isinstance(winning, dict) else None
+        blue = winning.get("blueBall") if isinstance(winning, dict) else None
+        issue = node.get("drawNumber")
+        if issue and isinstance(reds, list) and len(reds) == 6 and blue:
+            try:
+                rows.append(
+                    {
+                        "issue": str(issue),
+                        "draw_date": _parse_date(str(node.get("date") or "")),
+                        "reds": sorted(int(value) for value in reds),
+                        "blue": int(blue),
+                        "source": "ydniu",
+                    }
+                )
+            except (TypeError, ValueError):
+                pass
+        for value in node.values():
+            _collect_ydniu_draws(value, rows)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_ydniu_draws(value, rows)
 
 
 def _find_opening_number(node: object) -> OpeningNumber | None:
