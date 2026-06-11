@@ -18,7 +18,7 @@ services:
       - key: AUTO_SYNC_ON_STARTUP
         value: "false"
       - key: AUTO_SYNC_SOURCE
-        value: "zhcw"
+        value: "latest"
       - key: CORS_ORIGINS
         value: "*"
 

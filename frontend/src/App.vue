@@ -1,12 +1,22 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Brain, Database, Download, History, RefreshCw, Search, SlidersHorizontal, Trophy } from 'lucide-vue-next'
-import { fetchExpertSignals, generateTop, getDraws, getExpertConsensus, getStats, importExpertSignal, syncDraws } from './api'
+import {
+  fetchExpertSignals,
+  generateTop,
+  getDraws,
+  getExpertConsensus,
+  getLatestOpeningNumber,
+  getStats,
+  importExpertSignal,
+  syncDraws,
+} from './api'
 
 const stats = ref({ total_draws: 0, latest_issue: null, latest_date: null })
 const draws = ref([])
 const candidates = ref([])
 const expertConsensus = ref(null)
+const latestOpening = ref(null)
 const loading = ref('')
 const error = ref('')
 const lastSync = ref(null)
@@ -29,6 +39,7 @@ const form = reactive({
   candidate_pool: 50000,
   filters: {
     exclude_history: true,
+    exclude_latest_opening: true,
     history_overlap: 'similar5',
     exclude_numbers: [],
     exclude_blues: [],
@@ -83,19 +94,21 @@ const parseNumberList = (text, min, max) =>
     .filter((item) => Number.isInteger(item) && item >= min && item <= max)
 
 const refresh = async () => {
-  const [statsPayload, drawsPayload, consensusPayload] = await Promise.all([
+  const [statsPayload, drawsPayload, consensusPayload, openingPayload] = await Promise.all([
     getStats(),
     getDraws(),
     getExpertConsensus(),
+    getLatestOpeningNumber().catch(() => null),
   ])
   stats.value = statsPayload
   draws.value = drawsPayload
   expertConsensus.value = consensusPayload
+  latestOpening.value = openingPayload
 }
 
 const handleSync = () =>
-  withLoading('正在同步中彩网历史开奖', async () => {
-    lastSync.value = await syncDraws({ source: 'zhcw' })
+  withLoading('正在同步最新开奖', async () => {
+    lastSync.value = await syncDraws({ source: 'latest' })
     await refresh()
   })
 
@@ -131,6 +144,12 @@ const formatConsensus = (items, pad = 2) =>
     .slice(0, 8)
     .map((item) => `${String(item.number).padStart(pad, '0')}(${item.weight})`)
     .join('、') || '无'
+
+const formatOpening = (opening) => {
+  if (!opening) return '暂未获取'
+  const reds = opening.reds.map((item) => String(item).padStart(2, '0')).join(' ')
+  return `${opening.issue}期 ${reds} + ${String(opening.blue).padStart(2, '0')}`
+}
 
 onMounted(() => {
   withLoading('正在读取系统状态', refresh)
@@ -251,6 +270,8 @@ onMounted(() => {
           <input v-model.number="form.filters.max_red_repeat" type="number" min="0" max="6" />
         </div>
         <label class="check"><input v-model="form.filters.exclude_history" type="checkbox" />排除历史号码</label>
+        <label class="check"><input v-model="form.filters.exclude_latest_opening" type="checkbox" />排除最新北京开机号</label>
+        <p class="hint">当前开机号：{{ formatOpening(latestOpening) }}</p>
         <label class="check"><input v-model="form.filters.allow_two_consecutive" type="checkbox" />允许2连号</label>
         <label class="check"><input v-model="form.filters.reject_three_consecutive" type="checkbox" />排除3连号</label>
         <label class="check"><input v-model="form.filters.reject_four_consecutive" type="checkbox" />排除4连号</label>

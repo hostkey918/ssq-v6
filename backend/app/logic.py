@@ -103,6 +103,7 @@ def build_history(
     draws: list[Draw],
     filters: FilterConfig,
     expert_signals: list[object] | None = None,
+    opening_number: object | None = None,
 ) -> dict[str, object]:
     recent30 = draws[:30]
     recent100 = draws[:100]
@@ -110,6 +111,13 @@ def build_history(
     all_ticket_keys = {draw_key(draw.reds, draw.blue) for draw in draws}
     latest = draws[0] if draws else None
     latest_red_mask = red_mask(latest.reds) if latest else 0
+
+    opening_key = None
+    if opening_number:
+        opening_reds = getattr(opening_number, "reds", None) or []
+        opening_blue = getattr(opening_number, "blue", None)
+        if len(opening_reds) == 6 and opening_blue is not None:
+            opening_key = draw_key(opening_reds, int(opening_blue))
 
     return {
         "recent30": recent30,
@@ -124,6 +132,7 @@ def build_history(
         "latest_reds": set(latest.reds) if latest else set(),
         "latest_red_mask": latest_red_mask,
         "latest_blue": latest.blue if latest else None,
+        "latest_opening_key": opening_key,
         "expert_profile": _build_expert_profile(expert_signals or [], filters),
     }
 
@@ -134,8 +143,9 @@ def generate_candidates(
     top_n: int,
     candidate_pool: int,
     expert_signals: list[object] | None = None,
+    opening_number: object | None = None,
 ) -> list[CandidateOut]:
-    history = build_history(draws, filters, expert_signals)
+    history = build_history(draws, filters, expert_signals, opening_number)
     required = sorted(set(filters.dan_numbers or []))
     excluded = set(filters.exclude_numbers or [])
     kill_tails = set(filters.kill_tails or [])
@@ -185,6 +195,12 @@ def generate_candidates(
     for red_score, reds in red_heap:
         for blue in blue_numbers:
             if filters.reject_blue_repeat and blue == history["latest_blue"]:
+                continue
+            if (
+                filters.exclude_latest_opening
+                and history["latest_opening_key"]
+                and draw_key(reds, blue) == history["latest_opening_key"]
+            ):
                 continue
             if filters.exclude_history and draw_key(reds, blue) in history["all_ticket_keys"]:
                 continue

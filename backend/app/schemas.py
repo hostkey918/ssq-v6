@@ -14,13 +14,22 @@ class SyncResult(BaseModel):
     fetched: int
     inserted: int
     updated: int
-    source: str = "cwl"
+    source: str = "latest"
     pages_ok: int | None = None
     errors: list[str] = Field(default_factory=list)
 
 
+class OpeningNumberOut(BaseModel):
+    issue: str
+    draw_date: date | None = None
+    reds: list[int]
+    blue: int
+    source: str
+
+
 class FilterConfig(BaseModel):
     exclude_history: bool = True
+    exclude_latest_opening: bool = True
     history_overlap: str = Field(default="similar5", pattern="^(none|exact|similar5)$")
     exclude_numbers: list[int] = Field(default_factory=list)
     exclude_blues: list[int] = Field(default_factory=list)

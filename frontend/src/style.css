@@ -167,6 +167,16 @@ h2 {
   align-items: center;
 }
 
+.hint {
+  margin: -2px 16px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f9fb;
+  color: #657386;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 input[type="number"] {
   width: 100%;
   min-height: 36px;

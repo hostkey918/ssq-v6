@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import date
+from html import unescape
 from pathlib import Path
 
 import requests
@@ -18,6 +21,7 @@ from app.schemas import SyncResult
 
 CWL_URL = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
 ZHCW_SSQ_URL = "https://kaijiang.zhcw.com/zhcw/inc/ssq/ssq_wqhg.jsp"
+YDN_OPENING_URL = "http://www.ydniu.com/open/ssqkjh.html"
 SEED_CSV_PATH = Path(__file__).resolve().parent / "data" / "ssq_draws_seed.csv"
 ZHCW_ROW_RE = re.compile(
     r"<tr>\s*"
@@ -28,6 +32,28 @@ ZHCW_ROW_RE = re.compile(
 )
 ZHCW_MAX_PAGE_RE = re.compile(r"共\s*<strong>\s*(\d+)\s*</strong>\s*页")
 ZHCW_NUMBER_RE = re.compile(r"<em(?:\s+class=\"rr\")?\s*>\s*(\d{1,2})\s*</em>")
+SCRIPT_JSON_RE = re.compile(
+    r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(?P<body>.*?)</script>",
+    re.S | re.I,
+)
+OPENING_FALLBACK_RE = re.compile(
+    r"(?P<issue>\d{5,7})\s*期.{0,120}?"
+    r"(?P<reds>\d{2}\s+\d{2}\s+\d{2}\s+\d{2}\s+\d{2}\s+\d{2})\s*\+\s*(?P<blue>\d{2})",
+    re.S,
+)
+
+
+@dataclass(frozen=True)
+class OpeningNumber:
+    issue: str
+    draw_date: date | None
+    reds: list[int]
+    blue: int
+    source: str = "ydniu"
+
+    @property
+    def key(self) -> str:
+        return "-".join(f"{number:02d}" for number in sorted(self.reds)) + f"+{self.blue:02d}"
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -68,6 +94,88 @@ def fetch_cwl_draws(issue_count: int | None = None) -> list[dict[str, object]]:
             }
         )
     return draws
+
+
+def fetch_latest_draws(issue_count: int | None = None) -> tuple[list[dict[str, object]], list[str]]:
+    count = issue_count or 5
+    errors: list[str] = []
+    for source_name, fetch in (
+        ("cwl", lambda: fetch_cwl_draws(count)),
+        ("zhcw", lambda: fetch_zhcw_draws(start_page=1, end_page=1)[0]),
+    ):
+        try:
+            rows = fetch()
+            if rows:
+                return rows, errors
+            errors.append(f"{source_name}: no rows returned")
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+    return [], errors
+
+
+def fetch_latest_opening_number() -> OpeningNumber | None:
+    response = requests.get(
+        YDN_OPENING_URL,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+            ),
+            "Connection": "close",
+        },
+        timeout=(3, 8),
+    )
+    response.raise_for_status()
+    response.encoding = response.apparent_encoding or response.encoding
+    html = response.text
+    return parse_opening_number_page(html)
+
+
+def parse_opening_number_page(html: str) -> OpeningNumber | None:
+    for match in SCRIPT_JSON_RE.finditer(html):
+        script = unescape(match.group("body")).strip()
+        try:
+            payload = json.loads(script)
+        except json.JSONDecodeError:
+            continue
+        opening = _find_opening_number(payload)
+        if opening:
+            return opening
+
+    fallback = OPENING_FALLBACK_RE.search(re.sub(r"<[^>]+>", " ", html))
+    if not fallback:
+        return None
+    return OpeningNumber(
+        issue=fallback.group("issue"),
+        draw_date=None,
+        reds=sorted(int(value) for value in fallback.group("reds").split()),
+        blue=int(fallback.group("blue")),
+    )
+
+
+def _find_opening_number(node: object) -> OpeningNumber | None:
+    if isinstance(node, dict):
+        if "openingNumber" in node:
+            opening = node.get("openingNumber") or {}
+            reds = opening.get("redBalls") or []
+            blue = opening.get("blueBall")
+            if len(reds) == 6 and blue:
+                return OpeningNumber(
+                    issue=str(node.get("drawNumber") or ""),
+                    draw_date=_parse_date(str(node.get("date") or "")),
+                    reds=sorted(int(value) for value in reds),
+                    blue=int(blue),
+                )
+        for value in node.values():
+            found = _find_opening_number(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_opening_number(value)
+            if found:
+                return found
+    return None
 
 
 def fetch_seed_draws(seed_path: Path = SEED_CSV_PATH) -> list[dict[str, object]]:
@@ -170,13 +278,15 @@ def _download_zhcw_page(page_num: int, retries: int = 3) -> str:
 def sync_draws(
     db: Session,
     issue_count: int | None = None,
-    source: str = "zhcw",
+    source: str = "latest",
     start_page: int = 1,
     end_page: int | None = None,
 ) -> SyncResult:
     pages_ok = None
     errors: list[str] = []
-    if source == "cwl":
+    if source == "latest":
+        rows, errors = fetch_latest_draws(issue_count)
+    elif source == "cwl":
         rows = fetch_cwl_draws(issue_count)
     elif source == "seed":
         rows = fetch_seed_draws()

@@ -21,7 +21,7 @@ from app.expert import (
     signal_to_out,
     source_name_from_url,
 )
-from app.fetcher import sync_draws
+from app.fetcher import fetch_latest_opening_number, sync_draws
 from app.logic import generate_candidates
 from app.models import Draw, ExpertSignal
 from app.scheduler import create_scheduler
@@ -33,6 +33,7 @@ from app.schemas import (
     ExpertSignalIn,
     ExpertSignalOut,
     GenerateRequest,
+    OpeningNumberOut,
     StatsOut,
     SyncResult,
 )
@@ -116,7 +117,7 @@ def list_draws(
 @app.post("/api/sync", response_model=SyncResult)
 def sync(
     issue_count: int | None = Query(default=None, ge=1, le=10000),
-    source: str = Query(default="zhcw", pattern="^(zhcw|cwl|seed)$"),
+    source: str = Query(default="latest", pattern="^(latest|zhcw|cwl|seed)$"),
     start_page: int = Query(default=1, ge=1, le=300),
     end_page: int | None = Query(default=None, ge=1, le=300),
     db: Session = Depends(get_db),
@@ -133,18 +134,42 @@ def sync(
         raise HTTPException(status_code=502, detail=f"抓取开奖数据失败: {exc}") from exc
 
 
+@app.get("/api/opening-number/latest", response_model=OpeningNumberOut)
+def latest_opening_number() -> OpeningNumberOut:
+    try:
+        opening = fetch_latest_opening_number()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"抓取开机号失败: {exc}") from exc
+    if not opening:
+        raise HTTPException(status_code=404, detail="未找到最新开机号")
+    return OpeningNumberOut(
+        issue=opening.issue,
+        draw_date=opening.draw_date,
+        reds=opening.reds,
+        blue=opening.blue,
+        source=opening.source,
+    )
+
+
 @app.post("/api/generate", response_model=list[CandidateOut])
 def generate(request: GenerateRequest, db: Session = Depends(get_db)) -> list[CandidateOut]:
     draws = db.query(Draw).order_by(desc(Draw.issue)).all()
     if not draws:
         raise HTTPException(status_code=400, detail="历史开奖为空，请先同步数据")
     expert_signals = db.query(ExpertSignal).order_by(desc(ExpertSignal.created_at)).limit(30).all()
+    opening_number = None
+    if request.filters.exclude_latest_opening:
+        try:
+            opening_number = fetch_latest_opening_number()
+        except Exception:
+            opening_number = None
     return generate_candidates(
         draws=draws,
         filters=request.filters,
         top_n=request.top_n,
         candidate_pool=request.candidate_pool,
         expert_signals=expert_signals,
+        opening_number=opening_number,
     )
 
 
